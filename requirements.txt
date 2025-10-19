@@ -1,7 +1,6 @@
-flask==3.1.2
-python-binance==1.0.30
-cryptography==46.0.3
-binance
 flask
-python-binance
 requests
+python-binance==1.0.19
+cryptography
+
+
