@@ -9,17 +9,16 @@ import requests
 import threading
 from time import sleep
 
-# ============ НАСТРОЙКИ ============
+# ================= НАСТРОЙКИ ==================
 API_KEY = os.getenv("BINANCE_API_KEY", "***")
 API_SECRET = os.getenv("BINANCE_API_SECRET", "***")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "***")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "***")
 
-# URL автоподхват из Render, иначе можно задать вручную
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://one-uutn.onrender.com").strip("/")
-
-# ===================================
+# Render автоматически передаёт URL в переменной среды RENDER_EXTERNAL_URL
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", None)
+# ==============================================
 
 app = Flask(__name__)
 
@@ -36,7 +35,7 @@ try:
     usdt_balance = next(b["balance"] for b in balance if b["asset"] == "USDT")
     logger.info(f"✅ Binance клиент инициализирован. Баланс USDT: {usdt_balance}")
 except Exception as e:
-    logger.error(f"Ошибка инициализации Binance: {e}")
+    logger.error(f"❌ Ошибка инициализации Binance: {e}")
     client = None
 
 # === Telegram ===
@@ -118,7 +117,48 @@ def webhook():
     logger.info(f"📩 Получен сигнал: {data}")
     try:
         symbol = data["symbol"].replace(".P", "")
-        side =
+        side = data["side"].lower()
+        amount = float(data.get("amount", 50))
+        pos_amt, _ = get_position(symbol)
+        if side == "buy":
+            if pos_amt < 0:
+                close_position(symbol, side)
+                sleep(1)
+            open_position(symbol, side, amount)
+        elif side == "sell":
+            if pos_amt > 0:
+                close_position(symbol, side)
+                sleep(1)
+            open_position(symbol, side, amount)
+    except Exception as e:
+        logger.error(f"Ошибка обработки сигнала: {e}")
+    return {"code": "success"}, 200
+
+@app.route("/")
+def home():
+    return "✅ Binance Futures Webhook Server активен и не засыпает!"
+
+# === Keep-alive thread ===
+def keep_alive():
+    # Автоматически подставляем Render URL
+    if not RENDER_URL:
+        logger.warning("⚠️ Не найден RENDER_EXTERNAL_URL. Keep-alive будет выключен.")
+        return
+    while True:
+        try:
+            requests.get(RENDER_URL, timeout=10)
+            logger.info(f"💓 Keep-alive ping sent to {RENDER_URL}")
+        except Exception as e:
+            logger.warning(f"Keep-alive error: {e}")
+        sleep(60)
+
+if __name__ == "__main__":
+    if RENDER_URL:
+        threading.Thread(target=keep_alive, daemon=True).start()
+    logger.info("🚀 Starting server on port 5000")
+    app.run(host="0.0.0.0", port=5000)
+
+
 
 
 
