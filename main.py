@@ -1,137 +1,98 @@
 import os
 import json
 import logging
-import requests
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
+import requests
 
-# === НАСТРОЙКИ ===
-API_KEY = "ВСТАВЬ_СВОЙ_API_KEY"
-API_SECRET = "ВСТАВЬ_СВОЙ_API_SECRET"
-TELEGRAM_TOKEN = "ВСТАВЬ_СВОЙ_ТЕЛЕГРАМ_ТОКЕН"
-TELEGRAM_CHAT_ID = "684398336"
-
-# === ЛОГИ ===
+# === Настройка логов ===
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+# === Flask ===
 app = Flask(__name__)
 
-# === ИНИЦИАЛИЗАЦИЯ BINANCE ===
+# === Переменные окружения ===
+API_KEY = os.getenv("API_KEY", "").encode("utf-8").decode("utf-8", "ignore")
+API_SECRET = os.getenv("API_SECRET", "").encode("utf-8").decode("utf-8", "ignore")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# === Telegram уведомления ===
+def send_telegram_message(msg: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.warning("Telegram config missing — skipping message.")
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=5
+        )
+    except Exception as e:
+        logging.error(f"Ошибка отправки Telegram: {e}")
+
+# === Инициализация Binance ===
+client = None
 try:
-    client = Client(API_KEY.strip(), API_SECRET.strip())
+    client = Client(API_KEY, API_SECRET)
     balance = client.futures_account_balance()
-    usdt_balance = next((b["balance"] for b in balance if b["asset"] == "USDT"), "0")
+    usdt_balance = next((float(b['balance']) for b in balance if b['asset'] == 'USDT'), 0)
     logging.info(f"✅ Binance client initialized. USDT balance: {usdt_balance}")
 except Exception as e:
     logging.error(f"Ошибка инициализации Binance: {e}")
-    client = None
 
-
-# === ТЕЛЕГРАМ ===
-def send_telegram(text: str):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-        requests.post(url, data=data, timeout=10)
-    except Exception as e:
-        logging.error(f"Ошибка отправки в Telegram: {e}")
-
-
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
-def get_position(symbol):
-    """Получает размер текущей позиции по символу."""
-    try:
-        pos_info = client.futures_position_information(symbol=symbol)
-        position_amt = float(pos_info[0]["positionAmt"])
-        return position_amt
-    except Exception as e:
-        logging.error(f"Ошибка получения позиции {symbol}: {e}")
-        return 0.0
-
-
-def get_price(symbol):
-    """Получает текущую рыночную цену символа."""
-    try:
-        ticker = client.futures_symbol_ticker(symbol=symbol)
-        return float(ticker["price"])
-    except Exception as e:
-        logging.error(f"Ошибка получения цены {symbol}: {e}")
-        return 0.0
-
-
-def open_position(symbol, side, amount_usdt):
-    """Открывает позицию на указанную сумму в USDT."""
-    price = get_price(symbol)
-    if price == 0:
-        logging.error("Цена = 0, невозможно рассчитать количество.")
-        return
-    qty = round(amount_usdt / price, 3)
-    try:
-        res = client.futures_create_order(
-            symbol=symbol,
-            side=side.upper(),
-            type="MARKET",
-            quantity=qty,
-            positionSide="BOTH",
-        )
-        logging.info(f"✅ Открыта позиция {side} {symbol} qty={qty}")
-        send_telegram(f"✅ Открыта позиция {side} {symbol} на сумму ≈ {amount_usdt} USDT ({qty} шт)")
-    except BinanceAPIException as e:
-        logging.error(f"Ошибка открытия позиции: {e}")
-
-
-def close_position(symbol, qty, side):
-    """Закрывает позицию обратным ордером."""
-    try:
-        res = client.futures_create_order(
-            symbol=symbol,
-            side="BUY" if side.upper() == "SELL" else "SELL",
-            type="MARKET",
-            quantity=abs(qty),
-            positionSide="BOTH",
-            reduceOnly=True,
-        )
-        logging.info(f"✅ Закрыта позиция {symbol} qty={qty}")
-        send_telegram(f"✅ Закрыта позиция {symbol} qty={qty}")
-    except BinanceAPIException as e:
-        logging.error(f"Ошибка закрытия позиции: {e}")
-
-
-# === ВЕБХУК ===
+# === Webhook ===
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
     logging.info(f"📩 Получен сигнал: {data}")
 
     try:
-        symbol = data.get("symbol", "").replace(".P", "")
-        side = data.get("side", "").lower()
-        amount = float(data.get("amount", 0))
-        if not symbol or amount <= 0:
-            return "Некорректные данные", 400
+        symbol = data["symbol"].replace(".P", "")
+        side = data["side"].upper()
+        amount = float(data["amount"])
+        price_type = data.get("price", "market")
 
-        current_pos = get_position(symbol)
+        # Закрытие открытых позиций
+        positions = client.futures_position_information(symbol=symbol)
+        current_pos = float(positions[0]["positionAmt"])
         if current_pos != 0:
-            logging.info(f"🔄 Закрываю старую позицию {symbol}: {current_pos}")
-            close_position(symbol, current_pos, side)
+            close_side = "SELL" if current_pos > 0 else "BUY"
+            client.futures_create_order(
+                symbol=symbol, side=close_side, type="MARKET", quantity=abs(current_pos)
+            )
+            send_telegram_message(f"❌ Закрыта позиция {symbol}: {close_side} {abs(current_pos)}")
 
-        open_position(symbol, side, amount)
-        return "ok", 200
+        # Открытие новой позиции
+        price = client.futures_symbol_ticker(symbol=symbol)["price"]
+        qty = round(amount / float(price), 3)
+        client.futures_create_order(symbol=symbol, side=side, type="MARKET", quantity=qty)
+        send_telegram_message(f"✅ Открыта позиция {symbol}: {side} на {amount} USDT")
 
+        return jsonify({"status": "ok"}), 200
+
+    except BinanceAPIException as e:
+        logging.error(f"Binance API error: {e}")
+        send_telegram_message(f"⚠️ Binance API error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
     except Exception as e:
-        logging.error(f"Ошибка обработки вебхука: {e}")
-        return "error", 500
+        logging.error(f"Ошибка обработки webhook: {e}")
+        send_telegram_message(f"❗ Ошибка webhook: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/")
-def index():
+def home():
     return "🚀 Binance Webhook Server работает!"
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
+    logging.info(f"Starting server on port {port}")
     app.run(host="0.0.0.0", port=port)
+
+
 
 
 
