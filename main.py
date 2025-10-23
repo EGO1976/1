@@ -1,6 +1,5 @@
 import os
 import json
-import math
 import logging
 import requests
 import pytz
@@ -10,19 +9,18 @@ from binance.client import Client
 from binance.enums import *
 from threading import Thread
 from time import sleep
-import sys
 
 # === НАСТРОЙКИ ===
-API_KEY = "***"
-API_SECRET = "***"
+API_KEY = os.getenv("BINANCE_API_KEY", "***")
+API_SECRET = os.getenv("BINANCE_API_SECRET", "***")
 
-TELEGRAM_TOKEN = "***"
-TELEGRAM_CHAT_ID = "***"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "***")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "***")
 
-PING_URL = "https://one-uutn.onrender.com"
-PING_INTERVAL = 240
+# Укажи сюда твой Render-домен
+PING_URL = os.getenv("PING_URL", "https://one-uutn.onrender.com")
+PING_INTERVAL = 240  # каждые 4 минуты
 PING_TIMEOUT = 15
-OPEN_TIMES_FILE = "open_times.json"  # для сохранения времени входа между рестартами
 
 # === Flask ===
 app = Flask(__name__)
@@ -41,7 +39,8 @@ class KievFormatter(logging.Formatter):
         return datetime.now(tz_kiev).strftime("%Y-%m-%d %H:%M:%S")
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
 for handler in logging.getLogger().handlers:
     handler.setFormatter(KievFormatter("%(asctime)s %(levelname)s %(message)s"))
 
@@ -62,33 +61,15 @@ except Exception as e:
 def send_telegram_message(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML"
+        }
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
         logger.warning(f"Ошибка отправки в Telegram: {e}")
 
-
-# === Сохранение/загрузка времени входа ===
-def load_open_times():
-    if os.path.exists(OPEN_TIMES_FILE):
-        try:
-            with open(OPEN_TIMES_FILE, "r") as f:
-                data = json.load(f)
-            return {k: datetime.fromisoformat(v) for k, v in data.items()}
-        except Exception:
-            return {}
-    return {}
-
-
-def save_open_times():
-    try:
-        with open(OPEN_TIMES_FILE, "w") as f:
-            json.dump({k: v.isoformat() for k, v in open_times.items()}, f)
-    except Exception as e:
-        logger.warning(f"Ошибка сохранения open_times: {e}")
-
-
-open_times = load_open_times()
 
 # === Вспомогательные ===
 def get_symbol_price(symbol):
@@ -111,6 +92,9 @@ def get_position(symbol):
         return 0.0, 0.0
 
 
+open_times = {}
+
+
 def open_position(symbol, side, notional_amount):
     price = get_symbol_price(symbol)
     if not price:
@@ -129,10 +113,7 @@ def open_position(symbol, side, notional_amount):
             reduceOnly=False,
             positionSide="BOTH",
         )
-
         open_times[symbol] = datetime.now(tz_kiev)
-        save_open_times()
-
         logger.info(f"✅ Позиция открыта: {symbol} {side.upper()} {notional_amount} USDT")
 
         arrow = "🟢⬆️" if side.lower() == "buy" else "🔴⬇️"
@@ -169,32 +150,26 @@ def close_position(symbol, side):
         )
 
         if entry_price > 0 and mark_price:
-            pnl = (mark_price - entry_price) * qty if pos_amt > 0 else (entry_price - mark_price) * qty
+            pnl = (mark_price - entry_price) * qty if pos_amt > 0 else (
+                entry_price - mark_price) * qty
 
         entry_time = open_times.pop(symbol, datetime.now(tz_kiev))
-        save_open_times()
-        exit_time = datetime.now(tz_kiev)
-        duration = exit_time - entry_time
-
-        # Корректно форматируем время
+        duration = datetime.now(tz_kiev) - entry_time
         days = duration.days
-        seconds = duration.seconds
-        hours, seconds = divmod(seconds, 3600)
-        minutes, seconds = divmod(seconds, 60)
-        time_text = f"{days} дн {hours} ч {minutes} мин {seconds} сек"
+        hours, remainder = divmod(duration.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
 
-        symbol_bold = f"<b>{symbol[:-4]}</b>USDT"
         result_emoji = "🚀" if pnl > 0 else "💔"
         sign = "+" if pnl > 0 else ""
 
         send_telegram_message(
             f"📉 <b>Позиция закрыта</b>\n"
-            f"🔹 {symbol_bold}\n"
+            f"🔹 <b>{symbol[:-4]}</b>USDT\n"
             f"{result_emoji} Результат: {sign}{pnl:.2f} USDT\n"
-            f"⏱ Время в позиции: {time_text}"
+            f"⏱ Время в позиции: {days} дн {hours} ч {minutes} мин {seconds} сек"
         )
 
-        logger.info(f"Позиция закрыта {symbol}. PnL={pnl:.2f} USDT, время {time_text}")
+        logger.info(f"Позиция закрыта {symbol}. PnL={pnl:.2f} USDT")
 
     except Exception as e:
         logger.error(f"Ошибка закрытия позиции: {e}")
@@ -208,7 +183,6 @@ def webhook():
         return {"code": "error", "message": "No data"}, 400
 
     logger.info(f"📩 Получен сигнал: {data}")
-
     try:
         symbol = data["symbol"].replace(".P", "")
         side = data["side"].lower()
@@ -225,7 +199,6 @@ def webhook():
                 close_position(symbol, side)
                 sleep(1)
             open_position(symbol, side, amount)
-
     except Exception as e:
         logger.error(f"Ошибка обработки сигнала: {e}")
 
@@ -237,41 +210,28 @@ def home():
     return f"✅ Server running ({kiev_time()})", 200
 
 
-# === Keep-alive + авто-рестарт ===
+# === Keep-alive ===
 def keep_alive():
-    fails = 0
     while True:
         try:
             r = requests.get(PING_URL, timeout=PING_TIMEOUT)
             if r.status_code == 200:
                 logger.info(f"💓 Keep-alive ping OK → {PING_URL}")
-                fails = 0
             else:
-                raise Exception(f"Status {r.status_code}")
+                logger.warning(f"⚠️ Keep-alive ping error: {r.status_code}")
         except Exception as e:
-            fails += 1
-            logger.warning(f"⚠️ Ошибка пинга ({fails}): {e}")
-            if fails >= 3:
-                msg = (
-                    f"🚨 <b>Replit не отвечает 3 раза подряд!</b>\n"
-                    f"⏰ Время: {kiev_time()}\n"
-                    f"🔄 Перезапуск через 5 секунд..."
-                )
-                send_telegram_message(msg)
-                logger.error("Replit завис — перезапуск приложения через 5 секунд...")
-                sleep(5)
-                send_telegram_message(f"✅ <b>Перезапуск выполнен</b>\n⏰ {kiev_time()}")
-                sleep(5)
-                os.execv(sys.executable, ["python"] + sys.argv)
+            logger.warning(f"⚠️ Ошибка пинга: {e}")
         sleep(PING_INTERVAL)
 
 
 # === Запуск ===
 if __name__ == "__main__":
-    send_telegram_message(f"🚀 <b>Сервер запущен</b>\n⏰ {kiev_time()}")
     Thread(target=keep_alive, daemon=True).start()
-    logger.info(f"🚀 Starting server on port 5000 ({kiev_time()})")
-    app.run(host="0.0.0.0", port=5000)
+    send_telegram_message(f"🚀 <b>Сервер запущен на Render</b>\n⏰ {kiev_time()}")
+    logger.info(f"🚀 Server started on port 5000 ({kiev_time()})")
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+
+
 
 
 
