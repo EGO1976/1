@@ -19,7 +19,7 @@ API_SECRET = "***"
 TELEGRAM_TOKEN = "***"
 TELEGRAM_CHAT_ID = "***"
 
-PING_URL = "https://17f0838d-a6eb-4496-885e-a23a4d936f99-00-3neryjhnoljjg.pike.replit.dev"
+PING_URL = "https://one-uutn.onrender.com"
 PING_INTERVAL = 240
 PING_TIMEOUT = 15
 OPEN_TIMES_FILE = "open_times.json"  # для сохранения времени входа между рестартами
@@ -272,6 +272,7 @@ if __name__ == "__main__":
     Thread(target=keep_alive, daemon=True).start()
     logger.info(f"🚀 Starting server on port 5000 ({kiev_time()})")
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
