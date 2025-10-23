@@ -229,7 +229,10 @@ if __name__ == "__main__":
     Thread(target=keep_alive, daemon=True).start()
     send_telegram_message(f"🚀 <b>Сервер запущен на Render</b>\n⏰ {kiev_time()}")
     logger.info(f"🚀 Server started on port 5000 ({kiev_time()})")
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+app.run(host="0.0.0.0", port=port)
+
+
 
 
 
