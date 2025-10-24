@@ -3,7 +3,7 @@ import json
 import logging
 import requests
 import pytz
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, request
 from binance.client import Client
 from binance.enums import *
@@ -17,9 +17,8 @@ API_SECRET = os.getenv("BINANCE_API_SECRET", "***")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "***")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "***")
 
-# Укажи сюда твой Render-домен
 PING_URL = os.getenv("PING_URL", "https://one-uutn.onrender.com")
-PING_INTERVAL = 240  # каждые 4 минуты
+PING_INTERVAL = 240
 PING_TIMEOUT = 15
 
 # === Flask ===
@@ -28,22 +27,18 @@ app = Flask(__name__)
 # === Киевское время ===
 tz_kiev = pytz.timezone("Europe/Kiev")
 
-
 def kiev_time():
     return datetime.now(tz_kiev).strftime("%Y-%m-%d %H:%M:%S")
-
 
 # === Логи с киевским временем ===
 class KievFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
         return datetime.now(tz_kiev).strftime("%Y-%m-%d %H:%M:%S")
 
-
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 for handler in logging.getLogger().handlers:
     handler.setFormatter(KievFormatter("%(asctime)s %(levelname)s %(message)s"))
-
 logger = logging.getLogger()
 
 # === Binance ===
@@ -55,7 +50,6 @@ try:
 except Exception as e:
     logger.error(f"Ошибка инициализации Binance: {e}")
     usdt_balance = 0
-
 
 # === Telegram ===
 def send_telegram_message(text):
@@ -70,6 +64,21 @@ def send_telegram_message(text):
     except Exception as e:
         logger.warning(f"Ошибка отправки в Telegram: {e}")
 
+# === Получение времени входа с Binance ===
+def get_entry_time(symbol):
+    try:
+        trades = client.futures_account_trades(symbol=symbol)
+        if not trades:
+            return None
+        open_trades = [t for t in trades if float(t["qty"]) > 0]
+        if not open_trades:
+            return None
+        last_trade = max(open_trades, key=lambda x: x["time"])
+        entry_time = datetime.fromtimestamp(last_trade["time"] / 1000, tz_kiev)
+        return entry_time
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось получить время входа {symbol}: {e}")
+        return None
 
 # === Вспомогательные ===
 def get_symbol_price(symbol):
@@ -79,7 +88,6 @@ def get_symbol_price(symbol):
     except Exception as e:
         logger.error(f"Ошибка получения цены {symbol}: {e}")
         return None
-
 
 def get_position(symbol):
     try:
@@ -91,10 +99,10 @@ def get_position(symbol):
         logger.warning(f"Не удалось получить позицию {symbol}: {e}")
         return 0.0, 0.0
 
-
+# === Хранение времени открытия (в памяти) ===
 open_times = {}
 
-
+# === Открытие позиции ===
 def open_position(symbol, side, notional_amount):
     price = get_symbol_price(symbol)
     if not price:
@@ -123,11 +131,10 @@ def open_position(symbol, side, notional_amount):
             f"{arrow} {side.upper()}\n"
             f"💰 Сумма: {notional_amount} USDT"
         )
-
     except Exception as e:
         logger.error(f"Ошибка открытия позиции: {e}")
 
-
+# === Закрытие позиции ===
 def close_position(symbol, side):
     pos_amt, entry_price = get_position(symbol)
     if pos_amt == 0:
@@ -149,15 +156,19 @@ def close_position(symbol, side):
             positionSide="BOTH",
         )
 
-        if entry_price > 0 and mark_price:
-            pnl = (mark_price - entry_price) * qty if pos_amt > 0 else (
-                entry_price - mark_price) * qty
+        entry_time = open_times.pop(symbol, None)
+        if not entry_time:
+            entry_time = get_entry_time(symbol)
+        if not entry_time:
+            entry_time = datetime.now(tz_kiev)
 
-        entry_time = open_times.pop(symbol, datetime.now(tz_kiev))
         duration = datetime.now(tz_kiev) - entry_time
         days = duration.days
         hours, remainder = divmod(duration.seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
+
+        if entry_price > 0 and mark_price:
+            pnl = (mark_price - entry_price) * qty if pos_amt > 0 else (entry_price - mark_price) * qty
 
         result_emoji = "🚀" if pnl > 0 else "💔"
         sign = "+" if pnl > 0 else ""
@@ -168,12 +179,10 @@ def close_position(symbol, side):
             f"{result_emoji} Результат: {sign}{pnl:.2f} USDT\n"
             f"⏱ Время в позиции: {days} дн {hours} ч {minutes} мин {seconds} сек"
         )
-
         logger.info(f"Позиция закрыта {symbol}. PnL={pnl:.2f} USDT")
 
     except Exception as e:
         logger.error(f"Ошибка закрытия позиции: {e}")
-
 
 # === Flask Webhook ===
 @app.route("/webhook", methods=["POST"])
@@ -204,13 +213,11 @@ def webhook():
 
     return {"code": "success"}, 200
 
-
 @app.route("/")
 def home():
     return f"✅ Server running ({kiev_time()})", 200
 
-
-# === Keep-alive ===
+# === Keep-alive (Render) ===
 def keep_alive():
     while True:
         try:
@@ -223,14 +230,15 @@ def keep_alive():
             logger.warning(f"⚠️ Ошибка пинга: {e}")
         sleep(PING_INTERVAL)
 
-
 # === Запуск ===
 if __name__ == "__main__":
     Thread(target=keep_alive, daemon=True).start()
     send_telegram_message(f"🚀 <b>Сервер запущен на Render</b>\n⏰ {kiev_time()}")
-    logger.info(f"🚀 Server started on port 5000 ({kiev_time()})")
     port = int(os.environ.get("PORT", 5000))
-app.run(host="0.0.0.0", port=port)
+    logger.info(f"🚀 Server started on port {port} ({kiev_time()})")
+    app.run(host="0.0.0.0", port=port)
+
+
 
 
 
